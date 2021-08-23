@@ -25,8 +25,10 @@ public class Transformer extends Writer {
 
     public Transformer(@NotNull SparkSession spark) {
         this.spark = spark;
+
         Dataset<Row> df = readInput();
         df = cleanData(df);
+
         if(FILTER_AGE == 1){
             df = filterByAge(df);
         }
@@ -37,7 +39,6 @@ public class Transformer extends Writer {
         df = columnSelection(df);
         df.show(100, false);
         df.printSchema();
-
         write(df);
     }
 
@@ -52,7 +53,9 @@ public class Transformer extends Writer {
                 clubName.column(),
                 overall.column(),
                 potential.column(),
-                teamPosition.column()
+                teamPosition.column(),
+                playerCat.column(),
+                potentialVsOverall.column()
         );
     }
 
@@ -60,11 +63,10 @@ public class Transformer extends Writer {
      * @return a Dataset readed from csv file
      */
     private Dataset<Row> readInput() {
-        Dataset<Row> df = spark.read()
+        return spark.read()
                 .option(HEADER, true)
                 .option(INFER_SCHEMA, true)
                 .csv(INPUT_PATH);
-        return df;
     }
 
     /**
@@ -78,30 +80,6 @@ public class Transformer extends Writer {
                         .and(shortName.column().isNotNull())
                         .and(overall.column().isNotNull())
         );
-        return df;
-    }
-
-    /**
-     * @param df is a Dataset with players information (must have team_position and height_cm columns)
-     * @return add to the Dataset the column "cat_height_by_position"
-     * by each position value
-     * cat A for if is in 20 players tallest
-     * cat B for if is in 50 players tallest
-     * cat C for the rest
-     */
-    private Dataset<Row> exampleWindowFunction(Dataset<Row> df) {
-        WindowSpec w = Window
-                .partitionBy(teamPosition.column())
-                .orderBy(heightCm.column().desc());
-
-        Column rank = rank().over(w);
-
-        Column rule = when(rank.$less(10), "A")
-                .when(rank.$less(50), "B")
-                .otherwise("C");
-
-        df = df.withColumn(catHeightByPosition.getName(), rule);
-
         return df;
     }
 
@@ -131,16 +109,15 @@ public class Transformer extends Writer {
         List<String> columnsName = Collections.singletonList(age.getName());
 
         if(requiredColumnsExist(df,columnsName)) {
-            LOG.warning("[ENTRA A FILTRAR JUGADORES MENORES DE 23]");
             df = df.filter(
-                    age.column().$less(23)
+                    age.column().isNotNull().and( age.column().$less(23))
             );
         }
         return df;
     }
 
     /**
-     * @param df is a Dataset<Row> with players information (must have team_position, nationality and overall columns)
+     * @param df is a Dataset with players information (must have team_position, nationality and overall columns)
      * @return add to the Dataset the column "cat_height_by_position"
      *
      * Agregar una columna player_cat que responderá a la siguiente regla (rank over Window particionada por nationality y team_position y ordenada por overall):
@@ -157,12 +134,24 @@ public class Transformer extends Writer {
                 overall.getName());
 
         if(requiredColumnsExist(df,columnsName)) {
-            LOG.info("[Start][addPlayerCat method][Entry if]");
+            LOG.info("[Entra a addPlayer bien]");
             WindowSpec w = Window
                     .partitionBy(nationality.column(),teamPosition.column())
                     .orderBy(overall.column().desc());
 
-            Column rank = row_number().over(w);
+            /*
+            Viendo la documentación de spark, al igual que en SQL,
+            tenemos las opciones de rank, dense_rank y row_number,
+
+            Para este caso de uso considero que el dense_rank es
+            mejor para aquellos jugadores que empaten en su overall
+            y se les asigne la misma posición en su país y posición
+
+            Con row_number solo tendríamos un top 10 entre A,B y C
+            Con un rank tendríamos paises y posiciones que no figuren
+            las B o las C
+             */
+            Column rank = dense_rank().over(w);
 
             Column rule = when(rank.$less$eq(3), "A")
                     .when(rank.$less$eq(5), "B")
@@ -193,7 +182,7 @@ public class Transformer extends Writer {
         if(requiredColumnsExist(df,columnsName)){
             df = df.withColumn(newColumnName.getName(), dividendColumnName.column().divide(divisorColumnName.column()));
         }else{
-            LOG.warning("[addColumnByDividedTwoFields] df doesn't have the required columns to filter properly");
+            LOG.warning("[addColumnByDividedTwoFields] df doesn't have the required columns to apply transform function properly");
         }
         return df;
     }
